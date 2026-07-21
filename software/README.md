@@ -32,7 +32,7 @@ Encoder feels backwards? Flip `ENCODER_REVERSE` in `src/main.cpp`.
 
 ## Menu
 
-Three items, shown on the 128×32 OLED as `SEL/EDIT  n/3  Label`:
+Four items, shown on the 128×32 OLED as `SEL/EDIT  n/4  Label`:
 
 ### 1. Input — how a pad triggers a note
 - **Capacitive** *(default)* — ESP32 `touchRead()` on the seven pads. This is
@@ -47,14 +47,68 @@ Three items, shown on the 128×32 OLED as `SEL/EDIT  n/3  Label`:
 | **Piano** | Bright pluck | Shorter pluck + an octave harmonic (one-shot) |
 | **Keyboard** | Sustained organ-ish | Sounds while the pad is **held**, releases when let go |
 | **Percussion** | Drum hit | Noise burst + pitch-dropping body (one-shot) |
+| **Flute** | Breathy, gentle vibrato | Near-pure tone + breath noise; sustains while **held** |
 
-> Only **Keyboard** sustains while held; the other three trigger and decay on
-> their own. Note-off is tracked per pad, so releasing a held Keyboard note
-> fades it out cleanly.
+> **Keyboard** and **Flute** sustain while held; the others trigger and decay on
+> their own. Note-off is tracked per pad, so releasing a held note fades it out
+> cleanly.
 
 ### 3. Scale — 7 semitone offsets mapped to the pads
 14 scales (Major, Dorian, … Hirajoshi). The two buttons also change this
 directly. Root note is C4 (`ROOT` in `src/main.cpp`).
+
+### 4. Screen — OLED orientation
+Toggles the OLED between **Normal** and **Flipped** (rotated 180°) so the menu
+is readable from the opposite side of the board. Any encoder turn while editing
+flips it. Display-only — the LED strip and pad order are not mirrored.
+
+## Sound Reference
+
+### Voices — how each is synthesised
+
+All voices are generated on-chip and played out the DAC; there is no sample
+memory. Each pad = one note of the current scale.
+
+| Voice | Technique | Character & tips |
+| --- | --- | --- |
+| **String** | Karplus-Strong: a burst of noise cycled through a short delay line that low-pass filters itself each pass, so it starts bright and mellows as it rings. | Warm plucked-string / harp. Long natural decay (~3 s). Best with pentatonic/blues scales for a harp feel. |
+| **Piano** | Same pluck, but shorter and less smoothed, plus an octave-up copy layered on top. | Brighter, more percussive attack, shorter tail. Good for melodic lines and chords. |
+| **Keyboard** | Additive oscillator: fundamental + octave + fifth-above sines summed, shaped by an attack/release envelope. | Sustained organ-ish tone that **holds while a pad is held**. Fuller, more "electric organ" than the plucks. |
+| **Percussion** | A short pitched sine "body" whose pitch drops instantly, mixed with a fast-decaying noise burst. | Drum/tom-like hits. Lower pads sound like toms/kick, higher pads snappier. Scale mostly changes the pitch of the thump. |
+| **Flute** | Near-pure sine (fundamental + a faint octave) plus a little breath noise, with a gentle ~5 Hz vibrato, attack/release envelope. | Soft, airy, **sustains while held**. Slow attack makes fast passages blur — good for slow melodies. |
+
+Plucks (String, Piano) and Percussion are *one-shot*: they trigger and ring out
+on their own. Keyboard and Flute are *sustained*: they keep sounding until you
+release the pad. Up to 10 notes can sound at once (`MAX_VOICES`).
+
+### Scales — the mood of each
+
+A scale is just seven semitone offsets from the root (C4) mapped to pads S1→S7,
+low to high. Switch scales with the encoder (Scale item) or the two buttons.
+Rough character of each:
+
+**Common modes**
+- **Major (Ionian)** — the standard "happy"/bright do-re-mi scale.
+- **Natural Minor (Aeolian)** — the standard "sad"/serious minor scale.
+- **Dorian** — minor but hopeful; jazzy, Celtic, folk flavour.
+- **Phrygian** — dark minor with a lowered 2nd; Spanish/flamenco, metal edge.
+- **Lydian** — major with a raised 4th; dreamy, floating, "film score" wonder.
+- **Mixolydian** — major with a lowered 7th; bluesy, rock, dominant feel.
+- **Locrian** — the darkest, most unstable mode; tense and dissonant.
+
+**Colourful / exotic**
+- **Harmonic Minor** — minor with a raised 7th; dramatic, classical, Middle-Eastern.
+- **Phrygian Dominant** — Spanish/Arabic sound; the "flamenco" scale.
+- **Hirajoshi** — a Japanese pentatonic scale; sparse, meditative, koto-like.
+- **Whole Tone** — every step a whole tone apart; dreamlike, ambiguous, "no home".
+
+**Easy / forgiving (great for improvising — no wrong notes)**
+- **Major Pentatonic** — five bright notes; cheerful, folky, hard to sound bad.
+- **Minor Pentatonic** — five moody notes; the backbone of rock/blues solos.
+- **Blues** — minor pentatonic plus the "blue note"; soulful, gritty.
+
+If you just want to noodle and have it always sound musical, pick one of the
+pentatonic scales or Blues.
 
 ## Pin Map
 
@@ -85,8 +139,9 @@ Everything is `const` at the top of `src/main.cpp`:
 - **Digital input polarity** — `DIGITAL_INPUT_ACTIVE_LOW`, `DIGITAL_INPUT_PULLDOWNS`.
 - **Retrigger rate** — `COOLDOWN_MS` (min gap between triggers on one pad).
 - **Voice character** — the `INSTRUMENTS[]` table: pluck `decay`/`smoothPasses`/
-  `lifeSec`, Keyboard `attackSec`/`releaseSec`, Percussion `percDecaySec`. The
-  Keyboard harmonic mix lives in `renderSample()` (`VK_TONE` branch).
+  `lifeSec`, Keyboard/Flute `attackSec`/`releaseSec`, Percussion `percDecaySec`.
+  The Keyboard and Flute harmonic/breath mix lives in `renderSample()`
+  (`VK_TONE` / `VK_FLUTE` branches); flute vibrato is `VIB_RATE`/`VIB_DEPTH`.
 - **Polyphony / audio** — `MAX_VOICES`, `SR` (sample rate), `LED_BRIGHTNESS`.
 
 Serial (115200) prints every trigger with pad, frequency, and (in Capacitive

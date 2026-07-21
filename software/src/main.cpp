@@ -137,8 +137,12 @@ const int NUM_SCALES = sizeof(SCALE_STEPS) / sizeof(SCALE_STEPS[0]);
 enum VoiceKind {
   VK_PLUCK,   // Karplus-Strong pluck (self-decaying)
   VK_TONE,    // sustained additive oscillator with attack/release envelope
-  VK_PERC     // percussive noise + pitched body, one-shot
+  VK_PERC,    // percussive noise + pitched body, one-shot
+  VK_FLUTE    // sustained breathy near-sine tone with gentle vibrato
 };
+
+// Sustained voices hold while the pad is held and fade on release.
+inline bool isSustainedKind(VoiceKind k) { return k == VK_TONE || k == VK_FLUTE; }
 
 struct Instrument {
   const char* name;
@@ -162,6 +166,7 @@ const Instrument INSTRUMENTS[] = {
   { "Piano",      "Bright pluck", VK_PLUCK, 0.9928f, 1,  1.4f,  true,   0.0f,   0.0f,  0.0f  },
   { "Keyboard",   "Sustained",    VK_TONE,  0.0f,    0,  0.0f,  false,  0.006f, 0.18f, 0.0f  },
   { "Percussion", "Drum hits",    VK_PERC,  0.0f,    0,  0.0f,  false,  0.0f,   0.0f,  0.32f },
+  { "Flute",      "Breathy",      VK_FLUTE, 0.0f,    0,  0.0f,  false,  0.040f, 0.12f, 0.0f  },
 };
 const int NUM_INSTRUMENTS = sizeof(INSTRUMENTS) / sizeof(INSTRUMENTS[0]);
 
@@ -173,11 +178,13 @@ enum MenuItem {
   MENU_MODE = 0,
   MENU_INSTRUMENT,
   MENU_SCALE,
+  MENU_SCREEN,
   MENU_COUNT
 };
 
 int  menuIdx     = MENU_MODE;
 bool menuEditing = false;
+bool screenFlipped = false;   // true = OLED rotated 180 for viewing from the far side
 const char* scaleButtonMsg = "";
 uint32_t scaleButtonMsgUntil = 0;
 
@@ -239,6 +246,18 @@ void changePlayMode(int delta) {
   setPlayMode((PlayMode)wrapIndex((int)playMode + delta, PLAY_MODE_COUNT));
 }
 
+void applyScreenRotation() {
+  if (!oledOK) return;
+  display.setRotation(screenFlipped ? 2 : 0);   // SSD1306: 2 = 180 degrees
+}
+
+void toggleScreenFlip() {
+  screenFlipped = !screenFlipped;
+  applyScreenRotation();
+  Serial.printf("screen -> %s\n", screenFlipped ? "flipped 180" : "normal");
+  drawMenu();
+}
+
 // ============================================================
 //  OLED MENU
 // ============================================================
@@ -256,6 +275,7 @@ const char* menuLabel() {
     case MENU_MODE:       return "Input";
     case MENU_INSTRUMENT: return "Voice";
     case MENU_SCALE:      return "Scale";
+    case MENU_SCREEN:     return "Screen";
     default:              return "Menu";
   }
 }
@@ -265,6 +285,7 @@ const char* menuValue() {
     case MENU_MODE:       return playModeName();
     case MENU_INSTRUMENT: return INSTRUMENTS[instrumentIdx].name;
     case MENU_SCALE:      return SCALE_SHORT_NAME[scaleIdx];
+    case MENU_SCREEN:     return screenFlipped ? "Flipped" : "Normal";
     default:              return "";
   }
 }
@@ -277,6 +298,8 @@ const char* menuDetail() {
       return INSTRUMENTS[instrumentIdx].detail;
     case MENU_SCALE:
       return scaleButtonMsgUntil ? scaleButtonMsg : SCALE_NAME[scaleIdx];
+    case MENU_SCREEN:
+      return screenFlipped ? "180 view" : "Upright";
     default:
       return "";
   }
@@ -336,6 +359,12 @@ inline float sineLookup(float cycles) {
   int idx = (int)(cycles * SINE_N) & (SINE_N - 1);
   return sineTab[idx];
 }
+
+// Shared low-frequency oscillator for flute vibrato.
+const float VIB_RATE  = 5.0f;          // Hz
+const float VIB_DEPTH = 0.004f;        // +/- pitch modulation (~7 cents)
+const float VIB_INC   = VIB_RATE / SR;
+float       vibratoPhase = 0.0f;
 
 // Fast noise for percussion (xorshift; avoids per-sample random()).
 uint32_t rngState = 0x9E3779B9u;
@@ -415,11 +444,12 @@ void startPluck(float freq, float decay = 0.9968f, int smoothPasses = 5, float l
   vc.active = true;
 }
 
-void startTone(float freq, float attackSec, float releaseSec, int pad) {
+// Start a sustained voice (Keyboard tone or Flute) owned by a pad.
+void startTone(VoiceKind kind, float freq, float attackSec, float releaseSec, int pad) {
   if (freq <= 0) return;
   int v = allocVoice();
   Voice &vc = voices[v];
-  vc.kind = VK_TONE;
+  vc.kind = kind;
   vc.phase = 0.0f;
   vc.phaseInc = freq / SR;
   vc.env = 0.0f;
@@ -456,7 +486,8 @@ void playNote(int pad, float freq) {
       if (ins.harmonic) startPluck(freq * 2.0f, 0.9900f, 1, 0.35f);
       break;
     case VK_TONE:
-      startTone(freq, ins.attackSec, ins.releaseSec, pad);
+    case VK_FLUTE:
+      startTone(ins.kind, freq, ins.attackSec, ins.releaseSec, pad);
       break;
     case VK_PERC:
       startPerc(freq, ins.percDecaySec);
@@ -469,7 +500,7 @@ void noteOff(int pad) {
   int v = padVoice[pad];
   if (v < 0) return;
   padVoice[pad] = -1;
-  if (voices[v].active && voices[v].kind == VK_TONE && voices[v].pad == pad) {
+  if (voices[v].active && isSustainedKind(voices[v].kind) && voices[v].pad == pad) {
     voices[v].sustaining = false;
   }
 }
@@ -480,6 +511,11 @@ inline void deactivate(Voice &vc, int i) {
 }
 
 inline float renderSample() {
+  // Advance the shared vibrato LFO once per output sample.
+  vibratoPhase += VIB_INC;
+  if (vibratoPhase >= 1.0f) vibratoPhase -= 1.0f;
+  float vibMod = 1.0f + VIB_DEPTH * sineLookup(vibratoPhase);
+
   float mix = 0.0f;
   for (int i = 0; i < MAX_VOICES; i++) {
     Voice &vc = voices[i];
@@ -501,6 +537,21 @@ inline float renderSample() {
               + 0.20f * sineLookup(vc.phase * 3.0f);
       s *= 0.5f;                       // headroom for the harmonic sum
       vc.phase += vc.phaseInc;
+      if (vc.phase >= 1.0f) vc.phase -= 1.0f;
+      if (vc.sustaining) {
+        vc.env += vc.attackRate;
+        if (vc.env > 1.0f) vc.env = 1.0f;
+      } else {
+        vc.env -= vc.releaseRate;
+        if (vc.env <= 0.0f) { vc.env = 0.0f; deactivate(vc, i); }
+      }
+      out = s * vc.env;
+
+    } else if (vc.kind == VK_FLUTE) {
+      // Near-pure tone (fundamental + faint octave) + breath noise + vibrato.
+      float s = sineLookup(vc.phase) + 0.12f * sineLookup(vc.phase * 2.0f);
+      s = s * 0.85f + fastNoise() * 0.05f;
+      vc.phase += vc.phaseInc * vibMod;
       if (vc.phase >= 1.0f) vc.phase -= 1.0f;
       if (vc.sustaining) {
         vc.env += vc.attackRate;
@@ -695,6 +746,7 @@ void changeSelectedMenuValue(int delta) {
     case MENU_INSTRUMENT: changeInstrument(delta); break;
     case MENU_SCALE:      changeScale(delta);      break;
     case MENU_MODE:       changePlayMode(delta);   break;
+    case MENU_SCREEN:     toggleScreenFlip();      break;   // two states: any turn flips
     default: break;
   }
 }
@@ -873,6 +925,7 @@ void setup() {
   if (!oledOK) {
     Serial.println("SSD1306 not found - check wiring / address 0x3C");
   } else {
+    applyScreenRotation();
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
     display.setTextSize(1);
